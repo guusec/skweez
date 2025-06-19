@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"unicode"
@@ -32,32 +33,32 @@ import (
 )
 
 type skweezConf struct {
-	debug      bool
-	depth      int
-	minLen     int
-	maxLen     int
-	scope      []string
-	output     string
-	noFilter   bool
-	jsonOutput bool
-	targets    []string
-	urlFilter  []*regexp.Regexp
-	onlyASCII  bool
-	userAgent  string
-	headers    []string
+	debug        bool
+	depth        int
+	minLen       int
+	maxLen       int
+	scope        []string
+	output       string
+	noFilter     bool
+	jsonOutput   bool
+	targets      []string
+	urlFilter    []*regexp.Regexp
+	onlyASCII    bool
+	userAgent    string
+	headers      []string
+	filesystemDir string
 }
 
 var validWordRegex = regexp.MustCompile(`^[a-zA-Z0-9]+.*[a-zA-Z0-9]$`)
 var stripTrailingSymbols = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"
 
 var rootCmd = &cobra.Command{
-	Use:   "skweez domain1 domain2 domain3",
-	Short: "Sqeezes the words out of websites",
+	Use:   "skweez [domain1 domain2 domain3]",
+	Short: "Sqeezes the words out of websites or from files in a directory",
 	Long: `skweez is a fast and easy to use tool that allows you to (recursively)
-crawl websites to generate word lists.`,
-	Args: cobra.MinimumNArgs(1),
+crawl websites or directories to generate word lists.`,
+	Args: cobra.MinimumNArgs(0),
 	Run: func(cmd *cobra.Command, args []string) {
-		// fetch cmd args
 		paramDebug, err := cmd.LocalFlags().GetBool("debug")
 		handleErr(err, false)
 		paramDepth, err := cmd.LocalFlags().GetInt("depth")
@@ -82,7 +83,15 @@ crawl websites to generate word lists.`,
 		handleErr(err, false)
 		paramHeaders, err := cmd.LocalFlags().GetStringArray("with-header")
 		handleErr(err, false)
-		// sanitize scope param
+		paramFilesystemDir, err := cmd.LocalFlags().GetString("filesystem")
+		handleErr(err, false)
+
+		// At least a domain or -f must be provided
+		if len(args) == 0 && paramFilesystemDir == "" {
+			fmt.Fprintln(os.Stderr, "error: must supply at least one domain or use the --filesystem/-f flag")
+			os.Exit(1)
+		}
+
 		sanitizedScope := []string{}
 		for _, element := range paramScope {
 			sanitizedScope = append(sanitizedScope, extractDomain(element))
@@ -91,34 +100,32 @@ crawl websites to generate word lists.`,
 			sanitizedScope = append(sanitizedScope, extractDomain(element))
 		}
 		if contains(sanitizedScope, "*") {
-			// empty string slice as scope -> "unlimited scope"
 			sanitizedScope = []string{}
 		}
-		// process regex filters if any specified
 		var preparedFilters []*regexp.Regexp
 		if (paramURLFilter != "") && (strings.Trim(" ", paramURLFilter) != "") {
-			sanitizedScope = []string{} // remove scope limits, so only the filter is applied
+			sanitizedScope = []string{}
 			preparedFilters = append(preparedFilters, regexp.MustCompile(paramURLFilter))
 		}
-		// collect targets from unnamed args
 		preparedTargets := []string{}
 		for _, element := range args {
 			preparedTargets = append(preparedTargets, toUri(element))
 		}
 		config := &skweezConf{
-			debug:      paramDebug,
-			depth:      paramDepth,
-			minLen:     paramMinLen,
-			maxLen:     paramMaxLen,
-			scope:      sanitizedScope,
-			urlFilter:  preparedFilters,
-			output:     paramOutput,
-			noFilter:   paramNoFilter,
-			jsonOutput: paramJsonOutput,
-			targets:    preparedTargets,
-			onlyASCII:  paramOnlyASCII,
-			userAgent:  paramUserAgent,
-			headers:    paramHeaders,
+			debug:        paramDebug,
+			depth:        paramDepth,
+			minLen:       paramMinLen,
+			maxLen:       paramMaxLen,
+			scope:        sanitizedScope,
+			urlFilter:    preparedFilters,
+			output:       paramOutput,
+			noFilter:     paramNoFilter,
+			jsonOutput:   paramJsonOutput,
+			targets:      preparedTargets,
+			onlyASCII:    paramOnlyASCII,
+			userAgent:    paramUserAgent,
+			headers:      paramHeaders,
+			filesystemDir: paramFilesystemDir,
 		}
 		run(config)
 	},
@@ -141,6 +148,7 @@ func init() {
 	rootCmd.Flags().Bool("onlyascii", false, "When set, filter out non ASCII words")
 	rootCmd.Flags().StringP("user-agent", "a", "", "Set custom user-agent")
 	rootCmd.Flags().StringArray("with-header", []string{}, "Add a header in the format key:value. May be used multiple times to add more headers, for example --with-header 'foo: abc' --with-header 'bar: xyz' to set the headers foo and bar to their appropriate values")
+	rootCmd.Flags().StringP("filesystem", "f", "", "Recursively scan a directory for text files to extract words from.")
 }
 
 func handleErr(err error, critical bool) {
@@ -153,15 +161,12 @@ func handleErr(err error, critical bool) {
 	}
 }
 
-// https://play.golang.org/p/Qg_uv_inCek
-// contains checks if a string is present in a slice
 func contains(s []string, str string) bool {
 	for _, v := range s {
 		if v == str {
 			return true
 		}
 	}
-
 	return false
 }
 
@@ -190,7 +195,6 @@ func registerCallbacks(collector *colly.Collector, config *skweezConf, cache *ma
 			for _, header := range config.headers {
 				var headerSplit = strings.SplitN(header, ":", 2)
 				if len(headerSplit) > 1 {
-					// header needs to be trimmed otherwise colly wont send request
 					r.Headers.Set(strings.TrimSpace(headerSplit[0]), headerSplit[1])
 				}
 			}
@@ -217,9 +221,7 @@ func registerCallbacks(collector *colly.Collector, config *skweezConf, cache *ma
 	})
 
 	collector.OnScraped(func(r *colly.Response) {
-		// https://stackoverflow.com/questions/44441665/how-to-extract-only-text-from-html-in-golang
 		logger.Println("Finished", r.Request.URL)
-
 		extractWords(r.Body, config, cache)
 	})
 }
@@ -228,7 +230,6 @@ func Split(r rune) bool {
 	return r == ' ' || r == '\n' || r == '\r'
 }
 
-// cache should be a param, too. Allows for better testability
 func extractWords(body []byte, config *skweezConf, cache *map[string]int) {
 	domDoc := html.NewTokenizer(strings.NewReader(string(body)))
 	previousStartTokenTest := domDoc.Token()
@@ -274,16 +275,57 @@ outer:
 	}
 }
 
+// --- Filesystem Scanning Support ---
+func isTextFile(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	b := make([]byte, 512)
+	n, _ := f.Read(b)
+	for i := 0; i < n; i++ {
+		if b[i] == 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func scanFilesystem(dir string, config *skweezConf, cache *map[string]int) {
+	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		if !isTextFile(path) {
+			return nil
+		}
+		body, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		extractWords(body, config, cache)
+		return nil
+	})
+	handleErr(err, false)
+}
+
 func run(config *skweezConf) {
 	cache := make(map[string]int)
-	c := initColly(config)
-	registerCallbacks(c, config, &cache)
-
-	for _, toVisit := range config.targets {
-		c.Visit(toVisit)
+	if config.filesystemDir != "" {
+		scanFilesystem(config.filesystemDir, config, &cache)
+	}
+	if len(config.targets) > 0 {
+		c := initColly(config)
+		registerCallbacks(c, config, &cache)
+		for _, toVisit := range config.targets {
+			c.Visit(toVisit)
+		}
 	}
 	outputResults(config, cache)
-
 }
 
 func outputResults(config *skweezConf, cache map[string]int) {
@@ -320,8 +362,6 @@ func extractDomain(uri string) string {
 	if !strings.Contains(uri, "/") {
 		return uri
 	} else {
-		// Strip https://, http:// and everything after and including the first slash of the remaining string
-		// https://github.com/edermi/skweez -> github.com/edermi/skweez -> github.com
 		noProto := strings.TrimPrefix(strings.TrimPrefix(uri, "http://"), "https://")
 		return strings.Split(noProto, "/")[0]
 	}
