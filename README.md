@@ -28,6 +28,7 @@ Usage:
 Flags:
       --debug                     Enable Debug output
   -d, --depth int                 Depth to spider. 0 = unlimited, 1 = Only provided site, 2... = specific depth (default 2)
+  -f, --filesystem string         Recursively scan a directory for text files to extract words from.
   -h, --help                      help for skweez
       --json                      Write words + counts in a json file. Requires --output/-o
   -n, --max-word-length int       Maximum word length (default 24)
